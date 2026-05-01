@@ -430,19 +430,37 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
   async tickCadence() {
     const now = Date.now();
 
-    // Refresh calendar before deciding; if it fails, we degrade to "page everything".
+    // Refresh calendar before deciding. If it fails AND we have a previous
+    // status cached, fall back to that — better than failing open (paging
+    // through what should be deferred). Only ignore the calendar entirely
+    // when we've never had a successful fetch.
     let calendarStatus: CalendarStatus | null = null;
+    let refreshFailed = false;
     try {
       calendarStatus = await this.refreshCalendarStatus();
     } catch (err) {
-      console.warn("[life-ops] calendar refresh failed; pages will not be deferred:", err);
+      refreshFailed = true;
+      console.warn(
+        "[life-ops] calendar refresh failed; falling back to last known state:",
+        err
+      );
     }
+    if (!calendarStatus) {
+      calendarStatus = this.state.calendarStatus ?? null;
+    }
+    const calendarConnected = Boolean(this.state.googleAccessToken);
 
     const busyNow = Boolean(calendarStatus?.busyNow);
     const busyUntil = calendarStatus?.busyUntil;
+    console.log(
+      `[life-ops] sweep: calendarConnected=${calendarConnected} busyNow=${busyNow}${busyUntil ? ` busyUntil=${new Date(busyUntil).toISOString()}` : ""} (refreshFailed=${refreshFailed}, fetchedAt=${calendarStatus?.fetchedAt ? new Date(calendarStatus.fetchedAt).toISOString() : "never"})`
+    );
     // Resume 30 min after the busy window ends — small post-meeting buffer.
-    const deferTarget =
-      busyNow && busyUntil ? busyUntil + 30 * 60 * 1000 : null;
+    // If we know we're busy but somehow don't have an end time, fall back to
+    // 1h from now so the gate still fires.
+    const deferTarget = busyNow
+      ? (busyUntil ?? now + 60 * 60 * 1000) + 30 * 60 * 1000
+      : null;
 
     const firedNames: string[] = [];
     const deferredNames: string[] = [];
@@ -494,20 +512,27 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
         continue;
       }
 
-      // It's due. Calendar gate: busy → defer (unless high priority).
-      if (busyNow && deferTarget && svc.priority !== "high") {
+      // It's due. Calendar gate: when busy, defer everything except
+      // services explicitly marked priority="high".
+      const isHighPriority = svc.priority === "high";
+      if (busyNow && !isHighPriority && deferTarget) {
         this.patchService(svc.id, { snoozedUntil: deferTarget });
         deferredNames.push(svc.name);
         perService.push({
           id: svc.id,
           name: svc.name,
           outcome: "deferred",
-          detail: `until ${fmtTime(deferTarget)}`
+          detail: `until ${fmtTime(deferTarget)} · default priority`
         });
         console.log(
-          `[life-ops] deferred ${svc.name}; next eligible ${new Date(deferTarget).toISOString()} (busy: "${calendarStatus?.busyTitle}")`
+          `[life-ops] deferred ${svc.name} (priority=${svc.priority ?? "default"}, busy: "${calendarStatus?.busyTitle ?? "?"}"); next eligible ${new Date(deferTarget).toISOString()}`
         );
         continue;
+      }
+      if (busyNow && isHighPriority) {
+        console.log(
+          `[life-ops] paging through busy: ${svc.name} (priority=high, busy: "${calendarStatus?.busyTitle ?? "?"}")`
+        );
       }
 
       try {
@@ -516,7 +541,10 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
         perService.push({
           id: svc.id,
           name: svc.name,
-          outcome: "paged"
+          outcome: "paged",
+          detail: busyNow && isHighPriority
+            ? "🔥 high priority — through busy window"
+            : undefined
         });
       } catch (err) {
         console.error(`[life-ops] sweep page failed for ${svc.id}:`, err);

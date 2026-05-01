@@ -1,221 +1,105 @@
-# Agent Starter
+# Life Ops
 
-![npm i agents command](./npm-agents-banner.svg)
+**SRE for the people you care about.** Treat your relationships, commitments, and recurring tasks as services with SLOs. When you fall behind, PagerDuty pages you. The same primitives that keep production healthy, applied to the people who put up with your two-nines availability.
 
-<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents-starter"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare"/></a>
+Built on Cloudflare Workers + the [Agents SDK](https://developers.cloudflare.com/agents/), with Anthropic Claude for the agent, PagerDuty for actual alerting, and Google Calendar for context-aware paging.
 
-A starter template for building AI chat agents on Cloudflare, powered by the [Agents SDK](https://developers.cloudflare.com/agents/).
+## The pitch
 
-Uses Workers AI (no API key required), with tools for weather, timezone detection, calculations with approval, task scheduling, and vision (image input).
+```
+Mom is a service.       SLO: call every 14 days.
+Plants are a service.   SLO: water every 3 days.
+Anniversary is a P1.    SLO: don't miss it. Ever.
 
-## Quick start
-
-```bash
-npx create-cloudflare@latest --template cloudflare/agents-starter
-cd agents-starter
-npm install
-npm run dev
+If you ignore the page, your sister gets paged. Filial piety has an SLA.
 ```
 
-Open [http://localhost:5173](http://localhost:5173) to see your agent in action.
+A Life Ops agent runs onboarding by chat ("brain-dump what matters"), provisions a real PagerDuty service + escalation policy per item, and runs a sweep every 15 seconds that pages your phone via the PagerDuty mobile app the moment something breaches its SLO.
 
-Try these prompts to see the different features:
+## What it does
 
-- **"What's the weather in Paris?"** — server-side tool (runs automatically)
-- **"What timezone am I in?"** — client-side tool (browser provides the answer)
-- **"Calculate 5000 \* 3"** — approval tool (asks you before running)
-- **"Remind me in 5 minutes to take a break"** — scheduling
-- **Drop an image and ask "What's in this image?"** — vision (image understanding)
+- **Conversational onboarding** — brain-dump people / commitments / chores to the agent; it extracts structured services live as you type
+- **Per-service PagerDuty provisioning** — every Life Ops service gets its own PD service, Events API integration, and witty escalation policy (e.g. *"Mom — Reply or Get Reported"*)
+- **Real pages on real phones** — uses PD's Events API v2 with rich `custom_details` (cadence, last fulfilled, notes); incidents show up in the actual PagerDuty mobile app
+- **Calendar-aware paging** — connects to Google Calendar; defers default-priority pages while you're in meetings, lets `high` priority cut through anyway
+- **15-second autonomous sweep** — self-perpetuating delay-based loop that scans every service and decides per-service: page, defer, or skip
+- **Bidirectional sync** — webhook subscription keeps state in sync with PagerDuty; ack/resolve from the mobile app updates the UI in real time
+- **Focus-driven safety net** — when the tab regains focus, syncs incident state with PD as a backup if webhooks were missed
+- **Auto-recurring anchors** — anniversaries roll forward by their cadence on resolve, so they automatically come back next year
+
+## Stack
+
+- **Cloudflare Workers** + **Agents SDK** — Durable Object per user, SQLite-backed state, native scheduling, WebSocket auto-reconnect
+- **Anthropic Claude (Haiku 4.5)** via Vercel AI SDK — the conversational agent + multi-step tool flow
+- **PagerDuty** — Events API v2 (triggering), REST API (provisioning services / escalation policies / webhook subscriptions), Webhooks v3 (state sync)
+- **Google Calendar API** — OAuth access token (read-only `calendar.events.readonly` scope), busy-window detection
+- **React + Kumo** — the chat UI and sidebar dashboard
 
 ## Project structure
 
 ```
 src/
-  server.ts    # Chat agent with tools and scheduling
-  app.tsx      # Chat UI built with Kumo components
-  client.tsx   # React entry point
-  styles.css   # Tailwind + Kumo styles
+  server.ts    # ChatAgent (Durable Object) — tools, sweep loop, webhook handler
+  pd.ts        # PagerDuty REST + Events API client
+  google.ts    # Google Calendar API client
+  app.tsx      # Chat UI + Life Ops sidebar
+  client.tsx   # React entry
+  styles.css
 ```
 
-## What's included
+## Quick start
 
-- **AI Chat** — Streaming responses powered by Workers AI via `AIChatAgent`
-- **Image input** — Drag-and-drop, paste, or click to attach images for vision-capable models
-- **Three tool patterns** — server-side auto-execute, client-side (browser), and human-in-the-loop approval
-- **Scheduling** — one-time, delayed, and recurring (cron) tasks
-- **Reasoning display** — shows model thinking as it streams, collapses when done
-- **Debug mode** — toggle in the header to inspect raw message JSON for each message
-- **Kumo UI** — Cloudflare's design system with dark/light mode
-- **Real-time** — WebSocket connection with automatic reconnection and message persistence
-
-## Making it your own
-
-### Name your project
-
-Update the name in `package.json` and `wrangler.jsonc` — the `name` in `wrangler.jsonc` becomes your deployed Worker's URL (`<name>.<subdomain>.workers.dev`).
-
-### Change the system prompt
-
-Edit the `system` string in `server.ts` to give your agent a different personality or focus area. This is the most impactful single change you can make.
-
-### Replace the demo tools with real ones
-
-The starter ships with demo tools (`getWeather` returns random data, `calculate` does basic arithmetic). Replace them with real implementations:
-
-```ts
-// In server.ts, replace a demo tool with a real API call:
-getWeather: tool({
-  description: "Get the current weather for a city",
-  inputSchema: z.object({ city: z.string() }),
-  execute: async ({ city }) => {
-    const res = await fetch(`https://api.weather.example/${city}`);
-    return res.json();
-  }
-}),
-```
-
-### Add your own tools
-
-Add new tools to the `tools` object in `server.ts`. There are three patterns:
-
-```ts
-// Auto-execute: runs on the server, no user interaction
-myTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ }),
-  execute: async (input) => { /* return result */ }
-}),
-
-// Client-side: no execute function, browser provides the result
-// Handle it in app.tsx via the onToolCall callback
-browserTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ })
-}),
-
-// Approval: add needsApproval to gate execution
-sensitiveTool: tool({
-  description: "...",
-  inputSchema: z.object({ /* ... */ }),
-  needsApproval: async (input) => true, // or conditional logic
-  execute: async (input) => { /* runs after approval */ }
-}),
-```
-
-### Customize scheduled task behavior
-
-When a scheduled task fires, `executeTask` runs on the server. It does its work and then uses `this.broadcast()` to notify connected clients (shown as a toast notification in the UI). Replace it with your own logic:
-
-```ts
-async executeTask(description: string, task: Schedule<string>) {
-  // Do the actual work
-  await sendEmail({ to: "user@example.com", subject: description });
-
-  // Notify connected clients
-  this.broadcast(
-    JSON.stringify({ type: "scheduled-task", description, timestamp: new Date().toISOString() })
-  );
-}
-```
-
-> **Why `broadcast()` instead of `saveMessages()`?** Injecting into chat history can cause the AI to see the notification as new context and re-trigger the same task in a loop. `broadcast()` sends a one-off event that the client displays separately from the conversation.
-
-### Remove scheduling
-
-If you don't need scheduling, remove `scheduleTask`, `getScheduledTasks`, and `cancelScheduledTask` from the tools object, the `executeTask` method, and the schedule-related imports (`getSchedulePrompt`, `scheduleSchema`, `Schedule`, `generateId`).
-
-### Add state beyond chat messages
-
-Use `this.setState()` and `this.state` for real-time state that syncs to all connected clients. See [Store and sync state](https://developers.cloudflare.com/agents/api-reference/store-and-sync-state/).
-
-### Add callable methods
-
-Expose agent methods as typed RPC that your client can call directly:
-
-```ts
-import { callable } from "agents";
-
-export class ChatAgent extends AIChatAgent<Env> {
-  @callable()
-  async getStats() {
-    return { messageCount: this.messages.length };
-  }
-}
-
-// Client-side:
-const stats = await agent.call("getStats");
-```
-
-See [Callable methods](https://developers.cloudflare.com/agents/api-reference/callable-methods/).
-
-### Connect to MCP servers
-
-Add external tools from MCP servers:
-
-```ts
-async onChatMessage(onFinish, options) {
-  // Connect to an MCP server
-  await this.mcp.connect("https://my-mcp-server.example/sse");
-
-  const result = streamText({
-    // ...
-    tools: {
-      ...myTools,
-      ...this.mcp.getAITools() // Include MCP tools
-    }
-  });
-}
-```
-
-See [MCP Client API](https://developers.cloudflare.com/agents/api-reference/mcp-client-api/).
-
-## Use a different AI model provider
-
-The starter uses [Workers AI](https://developers.cloudflare.com/workers-ai/) by default (no API key needed). To use a different provider:
-
-### OpenAI
+### 1. Install + run
 
 ```bash
-npm install @ai-sdk/openai
+npm install
+npm run dev
 ```
 
-```ts
-// In server.ts, replace the model:
-import { openai } from "@ai-sdk/openai";
+Opens on http://localhost:5173.
 
-// Inside onChatMessage:
-const result = streamText({
-  model: openai("gpt-5.2")
-  // ...
-});
-```
+### 2. Required secrets
 
-Create a `.env` file with your API key:
+Add to `.dev.vars`:
 
 ```
-OPENAI_API_KEY=your-key-here
+PAGERDUTY_REST_TOKEN=<General Access REST API key>
+PAGERDUTY_USER_EMAIL=<your email on the PagerDuty account>
+ANTHROPIC_API_KEY=<your Anthropic API key>
 ```
 
-### Anthropic
+To get the PD REST token: PagerDuty UI → **Integrations → Developer Tools → API Access Keys → Create New API Key**. Make sure the read-only checkbox is **off**.
 
-```bash
-npm install @ai-sdk/anthropic
-```
+For production, mirror each secret with `npx wrangler secret put NAME`.
 
-```ts
-import { anthropic } from "@ai-sdk/anthropic";
+### 3. Set up the PagerDuty webhook (after deploy)
 
-const result = streamText({
-  model: anthropic("claude-sonnet-4-20250514")
-  // ...
-});
-```
+After `npm run deploy`, open the deployed app and click **Set up webhook** in the sidebar footer. This calls `POST /webhook_subscriptions` against your PD account, registers the Worker URL as a destination, and stashes the signing secret. Without it, ack/resolve from the PD mobile app won't sync back to the UI.
 
-Create a `.env` file with your API key:
+### 4. Connect Google Calendar (optional)
 
-```
-ANTHROPIC_API_KEY=your-key-here
-```
+Click **Connect Google Calendar** in the sidebar, then paste an OAuth access token from Google's [OAuth Playground](https://developers.google.com/oauthplayground/) using scope `https://www.googleapis.com/auth/calendar.events.readonly`. Tokens expire after ~1 hour; for the demo, just paste a fresh one.
+
+When connected, the sweep checks "are you in a meeting right now?" before paging. Default-priority services get deferred until 30min after the meeting ends; services you've toggled to **🔥 High** page through anyway.
+
+## Using it
+
+1. **Open the app**, the agent greets you.
+2. **Brain-dump** what matters: *"Mom every 14 days, dentist every 6 months, plants twice a week, anniversary with Eva on Oct 12."*
+3. The agent extracts each item, deploys it to PagerDuty, and creates a witty escalation policy. You'll see service cards appear in the left sidebar live.
+4. **Click the icon** on a card to force the service due (demo trick — backdates `lastFulfilled` and re-runs the sweep). Watch it either page (calendar free) or defer (calendar busy).
+5. **Click the priority badge** on any card to toggle between **🔥 High** (always pages, even during meetings) and **Default** (defers when busy).
+6. **Hover a card → click X** in the top-right to delete (also deletes the PD service).
+
+The sidebar footer has a **Sweep** status that ticks live; click to expand and see per-service outcomes from the last sweep.
+
+## Architecture notes
+
+- One `ChatAgent` Durable Object per user; state syncs to all connected clients via the Agents SDK's `setState` primitive
+- Cron is minute-granularity, so the sweep uses a self-perpetuating `this.schedule(15, "tickCadence", null)` chain instead — each tick schedules the next, with cleanup logic in `onStart` to handle DO wakes
+- PagerDuty webhook deliveries are HMAC-signed; we verify when the secret is present (production), skip with a warning when missing (demo mode)
+- All webhook processing happens in `ctx.waitUntil()` so the handler returns 200 immediately and PD doesn't disable the subscription on slow deliveries
+- Each Life Ops service stores `pdServiceId`, `pdIntegrationKey`, and `pdEscalationPolicyId` so the bidirectional sync knows which local card a webhook event refers to
 
 ## Deploy
 
@@ -223,14 +107,7 @@ ANTHROPIC_API_KEY=your-key-here
 npm run deploy
 ```
 
-Your agent is live on Cloudflare's global network. Messages persist in SQLite, streams resume on disconnect, and the agent hibernates when idle.
-
-## Learn more
-
-- [Agents SDK documentation](https://developers.cloudflare.com/agents/)
-- [Build a chat agent tutorial](https://developers.cloudflare.com/agents/getting-started/build-a-chat-agent/)
-- [Chat agents API reference](https://developers.cloudflare.com/agents/api-reference/chat-agents/)
-- [Workers AI models](https://developers.cloudflare.com/workers-ai/models/)
+Then open the deployed URL, set up the webhook from the sidebar, and connect Calendar if you want the meeting-aware paging. Messages and Life Ops state both persist in SQLite-backed Durable Object storage; the agent hibernates when idle and the sweep cron wakes it up on schedule.
 
 ## License
 
