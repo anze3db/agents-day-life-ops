@@ -2,15 +2,13 @@ import { Suspense, useCallback, useState, useEffect, useRef } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
-import type { MCPServersState } from "agents";
-import type { ChatAgent } from "./server";
+import type { ChatAgent, ChatAgentState, LifeService } from "./server";
 import {
   Badge,
   Button,
   Empty,
   InputArea,
   Surface,
-  Switch,
   Text
 } from "@cloudflare/kumo";
 import { Toasty, useKumoToastManager } from "@cloudflare/kumo/components/toast";
@@ -29,14 +27,12 @@ import {
   XCircleIcon,
   BrainIcon,
   CaretDownIcon,
-  BugIcon,
-  PlugsConnectedIcon,
-  PlusIcon,
-  SignInIcon,
   XIcon,
-  WrenchIcon,
   PaperclipIcon,
-  ImageIcon
+  ImageIcon,
+  HeartIcon,
+  CalendarCheckIcon,
+  RepeatIcon
 } from "@phosphor-icons/react";
 
 // ── Attachment helpers ────────────────────────────────────────────────
@@ -218,31 +214,158 @@ function ToolPartView({
   return null;
 }
 
+// ── Life Ops sidebar ──────────────────────────────────────────────────
+
+const KIND_ICON = {
+  relationship: HeartIcon,
+  commitment: CalendarCheckIcon,
+  task: RepeatIcon
+} as const;
+
+function cadenceLabel(days: number): string {
+  if (days === 1) return "daily";
+  if (days === 7) return "weekly";
+  if (days === 14) return "biweekly";
+  if (days === 30) return "monthly";
+  if (days === 365) return "annual";
+  return `every ${days}d`;
+}
+
+function ServiceCard({
+  service,
+  onDeploy
+}: {
+  service: LifeService;
+  onDeploy: (id: string) => void;
+}) {
+  const Icon = KIND_ICON[service.kind];
+  const [deploying, setDeploying] = useState(false);
+  const deployed = Boolean(service.pdServiceId);
+
+  return (
+    <Surface className="px-3 py-2.5 rounded-lg ring ring-kumo-line">
+      <div className="flex items-start gap-2">
+        <Icon size={16} className="text-kumo-accent mt-0.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <Text size="sm" bold>
+              {service.name}
+            </Text>
+            <Badge variant="secondary">
+              {cadenceLabel(service.cadenceDays)}
+            </Badge>
+          </div>
+          <Text size="xs" variant="secondary">
+            {service.kind}
+          </Text>
+          {service.notes && (
+            <Text size="xs" variant="secondary">
+              {service.notes}
+            </Text>
+          )}
+          <div className="flex items-center gap-2 mt-2">
+            {deployed ? (
+              service.pdServiceUrl ? (
+                <a
+                  href={service.pdServiceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="no-underline"
+                >
+                  <Badge variant="primary">
+                    <CircleIcon
+                      size={8}
+                      weight="fill"
+                      className="mr-1 text-kumo-success"
+                    />
+                    Open in PagerDuty ↗
+                  </Badge>
+                </a>
+              ) : (
+                <Badge variant="primary">
+                  <CircleIcon
+                    size={8}
+                    weight="fill"
+                    className="mr-1 text-kumo-success"
+                  />
+                  Deployed
+                </Badge>
+              )
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={deploying}
+                onClick={async () => {
+                  setDeploying(true);
+                  try {
+                    await onDeploy(service.id);
+                  } finally {
+                    setDeploying(false);
+                  }
+                }}
+              >
+                {deploying ? "Deploying…" : "Deploy to PagerDuty"}
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </Surface>
+  );
+}
+
+function LifeOpsSidebar({
+  services,
+  onDeploy
+}: {
+  services: LifeService[];
+  onDeploy: (id: string) => void;
+}) {
+  return (
+    <aside className="w-72 shrink-0 border-r border-kumo-line bg-kumo-base flex flex-col">
+      <div className="px-4 py-4 border-b border-kumo-line flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-kumo-default">
+          <span className="mr-2">📟</span>Life Ops
+        </h2>
+        {services.length > 0 && (
+          <Badge variant="secondary">{services.length}</Badge>
+        )}
+      </div>
+      <div className="flex-1 overflow-y-auto p-3 space-y-2">
+        {services.length === 0 ? (
+          <div className="text-center py-8 px-3">
+            <Text size="sm" variant="secondary">
+              No services yet.
+            </Text>
+            <Text size="xs" variant="secondary">
+              Tell the agent what — and who — matters. Cards will appear here as
+              it understands.
+            </Text>
+          </div>
+        ) : (
+          services.map((s) => (
+            <ServiceCard key={s.id} service={s} onDeploy={onDeploy} />
+          ))
+        )}
+      </div>
+    </aside>
+  );
+}
+
 // ── Main chat ─────────────────────────────────────────────────────────
 
 function Chat() {
   const [connected, setConnected] = useState(false);
   const [input, setInput] = useState("");
-  const [showDebug, setShowDebug] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toasts = useKumoToastManager();
-  const [mcpState, setMcpState] = useState<MCPServersState>({
-    prompts: [],
-    resources: [],
-    servers: {},
-    tools: []
-  });
-  const [showMcpPanel, setShowMcpPanel] = useState(false);
-  const [mcpName, setMcpName] = useState("");
-  const [mcpUrl, setMcpUrl] = useState("");
-  const [isAddingServer, setIsAddingServer] = useState(false);
-  const mcpPanelRef = useRef<HTMLDivElement>(null);
 
-  const agent = useAgent<ChatAgent>({
+  const agent = useAgent<ChatAgent, ChatAgentState>({
     agent: "ChatAgent",
     onOpen: useCallback(() => setConnected(true), []),
     onClose: useCallback(() => setConnected(false), []),
@@ -250,9 +373,6 @@ function Chat() {
       (error: Event) => console.error("WebSocket error:", error),
       []
     ),
-    onMcpUpdate: useCallback((state: MCPServersState) => {
-      setMcpState(state);
-    }, []),
     onMessage: useCallback(
       (message: MessageEvent) => {
         try {
@@ -271,46 +391,6 @@ function Chat() {
       [toasts]
     )
   });
-
-  // Close MCP panel when clicking outside
-  useEffect(() => {
-    if (!showMcpPanel) return;
-    function handleClickOutside(e: MouseEvent) {
-      if (
-        mcpPanelRef.current &&
-        !mcpPanelRef.current.contains(e.target as Node)
-      ) {
-        setShowMcpPanel(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showMcpPanel]);
-
-  const handleAddServer = async () => {
-    if (!mcpName.trim() || !mcpUrl.trim()) return;
-    setIsAddingServer(true);
-    try {
-      await agent.stub.addServer(mcpName.trim(), mcpUrl.trim());
-      setMcpName("");
-      setMcpUrl("");
-    } catch (e) {
-      console.error("Failed to add MCP server:", e);
-    } finally {
-      setIsAddingServer(false);
-    }
-  };
-
-  const handleRemoveServer = async (serverId: string) => {
-    try {
-      await agent.stub.removeServer(serverId);
-    } catch (e) {
-      console.error("Failed to remove MCP server:", e);
-    }
-  };
-
-  const serverEntries = Object.entries(mcpState.servers);
-  const mcpToolCount = mcpState.tools.length;
 
   const {
     messages,
@@ -428,13 +508,53 @@ function Chat() {
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   }, [input, attachments, isStreaming, sendMessage]);
 
+  const services = agent.state?.services ?? [];
+
+  const hasUnurledDeployment = services.some(
+    (s) => s.pdServiceId && !s.pdServiceUrl
+  );
+  useEffect(() => {
+    if (hasUnurledDeployment && connected) {
+      agent.stub.backfillPdUrls().catch((e) => console.error(e));
+    }
+  }, [hasUnurledDeployment, connected, agent]);
+  const handleDeploy = useCallback(
+    async (id: string) => {
+      try {
+        const result = await agent.stub.deployLifeService(id);
+        if (result && "error" in result) {
+          toasts.add({
+            title: "Deploy failed",
+            description: String(result.error),
+            timeout: 6000
+          });
+        } else {
+          toasts.add({
+            title: "Deployed to PagerDuty",
+            description: "Service and Events API integration created.",
+            timeout: 4000
+          });
+        }
+      } catch (e) {
+        toasts.add({
+          title: "Deploy failed",
+          description: e instanceof Error ? e.message : String(e),
+          timeout: 6000
+        });
+      }
+    },
+    [agent, toasts]
+  );
+
   return (
-    <div
-      className="flex flex-col h-screen bg-kumo-elevated relative"
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
+    <div className="flex h-screen bg-kumo-elevated">
+      <LifeOpsSidebar services={services} onDeploy={handleDeploy} />
+      <div
+        className="flex-1 flex flex-col relative min-w-0"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
       {isDragging && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-kumo-elevated/80 backdrop-blur-sm border-2 border-dashed border-kumo-brand rounded-xl m-2 pointer-events-none">
           <div className="flex flex-col items-center gap-2 text-kumo-brand">
@@ -449,12 +569,8 @@ function Chat() {
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default">
-              <span className="mr-2">⛅</span>Agent Starter
+              SRE for the people you care about
             </h1>
-            <Badge variant="secondary">
-              <ChatCircleDotsIcon size={12} weight="bold" className="mr-1" />
-              AI Chat
-            </Badge>
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
@@ -467,185 +583,14 @@ function Chat() {
                 {connected ? "Connected" : "Disconnected"}
               </Text>
             </div>
-            <div className="flex items-center gap-1.5">
-              <BugIcon size={14} className="text-kumo-inactive" />
-              <Switch
-                checked={showDebug}
-                onCheckedChange={setShowDebug}
-                size="sm"
-                aria-label="Toggle debug mode"
-              />
-            </div>
             <ThemeToggle />
-            <div className="relative" ref={mcpPanelRef}>
-              <Button
-                variant="secondary"
-                icon={<PlugsConnectedIcon size={16} />}
-                onClick={() => setShowMcpPanel(!showMcpPanel)}
-              >
-                MCP
-                {mcpToolCount > 0 && (
-                  <Badge variant="primary" className="ml-1.5">
-                    <WrenchIcon size={10} className="mr-0.5" />
-                    {mcpToolCount}
-                  </Badge>
-                )}
-              </Button>
-
-              {/* MCP Dropdown Panel */}
-              {showMcpPanel && (
-                <div className="absolute right-0 top-full mt-2 w-96 z-50">
-                  <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-4">
-                    {/* Panel Header */}
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <PlugsConnectedIcon
-                          size={16}
-                          className="text-kumo-accent"
-                        />
-                        <Text size="sm" bold>
-                          MCP Servers
-                        </Text>
-                        {serverEntries.length > 0 && (
-                          <Badge variant="secondary">
-                            {serverEntries.length}
-                          </Badge>
-                        )}
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        shape="square"
-                        aria-label="Close MCP panel"
-                        icon={<XIcon size={14} />}
-                        onClick={() => setShowMcpPanel(false)}
-                      />
-                    </div>
-
-                    {/* Add Server Form */}
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        handleAddServer();
-                      }}
-                      className="space-y-2"
-                    >
-                      <input
-                        type="text"
-                        value={mcpName}
-                        onChange={(e) => setMcpName(e.target.value)}
-                        placeholder="Server name"
-                        className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent"
-                      />
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={mcpUrl}
-                          onChange={(e) => setMcpUrl(e.target.value)}
-                          placeholder="https://mcp.example.com"
-                          className="flex-1 px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent font-mono"
-                        />
-                        <Button
-                          type="submit"
-                          variant="primary"
-                          size="sm"
-                          icon={<PlusIcon size={14} />}
-                          disabled={
-                            isAddingServer || !mcpName.trim() || !mcpUrl.trim()
-                          }
-                        >
-                          {isAddingServer ? "..." : "Add"}
-                        </Button>
-                      </div>
-                    </form>
-
-                    {/* Server List */}
-                    {serverEntries.length > 0 && (
-                      <div className="space-y-2 max-h-60 overflow-y-auto">
-                        {serverEntries.map(([id, server]) => (
-                          <div
-                            key={id}
-                            className="flex items-start justify-between p-2.5 rounded-lg border border-kumo-line"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-kumo-default truncate">
-                                  {server.name}
-                                </span>
-                                <Badge
-                                  variant={
-                                    server.state === "ready"
-                                      ? "primary"
-                                      : server.state === "failed"
-                                        ? "destructive"
-                                        : "secondary"
-                                  }
-                                >
-                                  {server.state}
-                                </Badge>
-                              </div>
-                              <span className="text-xs font-mono text-kumo-subtle truncate block mt-0.5">
-                                {server.server_url}
-                              </span>
-                              {server.state === "failed" && server.error && (
-                                <span className="text-xs text-red-500 block mt-0.5">
-                                  {server.error}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-1 shrink-0 ml-2">
-                              {server.state === "authenticating" &&
-                                server.auth_url && (
-                                  <Button
-                                    variant="primary"
-                                    size="sm"
-                                    icon={<SignInIcon size={12} />}
-                                    onClick={() =>
-                                      window.open(
-                                        server.auth_url as string,
-                                        "oauth",
-                                        "width=600,height=800"
-                                      )
-                                    }
-                                  >
-                                    Auth
-                                  </Button>
-                                )}
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                shape="square"
-                                aria-label="Remove server"
-                                icon={<TrashIcon size={12} />}
-                                onClick={() => handleRemoveServer(id)}
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Tool Summary */}
-                    {mcpToolCount > 0 && (
-                      <div className="pt-2 border-t border-kumo-line">
-                        <div className="flex items-center gap-2">
-                          <WrenchIcon size={14} className="text-kumo-subtle" />
-                          <span className="text-xs text-kumo-subtle">
-                            {mcpToolCount} tool
-                            {mcpToolCount !== 1 ? "s" : ""} available from MCP
-                            servers
-                          </span>
-                        </div>
-                      </div>
-                    )}
-                  </Surface>
-                </div>
-              )}
-            </div>
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
-              onClick={clearHistory}
+              onClick={async () => {
+                await agent.stub.clearLifeServices();
+                clearHistory();
+              }}
             >
               Clear
             </Button>
@@ -659,14 +604,13 @@ function Chat() {
           {messages.length === 0 && (
             <Empty
               icon={<ChatCircleDotsIcon size={32} />}
-              title="Start a conversation"
+              title="Tell me who and what matters"
               contents={
                 <div className="flex flex-wrap justify-center gap-2">
                   {[
-                    "What's the weather in Paris?",
-                    "What timezone am I in?",
-                    "Calculate 5000 * 3",
-                    "Remind me in 5 minutes to take a break"
+                    "Mom in Slovenia, dentist every 6 months, plants twice a week",
+                    "Help me set up Life Ops",
+                    "What should I track?"
                   ].map((prompt) => (
                     <Button
                       key={prompt}
@@ -695,12 +639,6 @@ function Chat() {
 
             return (
               <div key={message.id} className="space-y-2">
-                {showDebug && (
-                  <pre className="text-[11px] text-kumo-subtle bg-kumo-control rounded-lg p-3 overflow-auto max-h-64">
-                    {JSON.stringify(message, null, 2)}
-                  </pre>
-                )}
-
                 {/* Tool parts */}
                 {message.parts.filter(isToolUIPart).map((part) => (
                   <ToolPartView
@@ -923,6 +861,7 @@ function Chat() {
             )}
           </div>
         </form>
+      </div>
       </div>
     </div>
   );
