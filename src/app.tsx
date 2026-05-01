@@ -269,15 +269,15 @@ function outcomeIcon(o: SweepOutcome): string {
 function ServiceCard({
   service,
   onDeploy,
-  onPageNow,
-  onResolve,
-  onForceDue
+  onForceDue,
+  onTogglePriority,
+  onDelete
 }: {
   service: LifeService;
   onDeploy: (s: LifeService) => void;
-  onPageNow: (s: LifeService) => void;
-  onResolve: (s: LifeService) => void;
   onForceDue: (s: LifeService) => void;
+  onTogglePriority: (s: LifeService) => void;
+  onDelete: (s: LifeService) => void;
 }) {
   const Icon = KIND_ICON[service.kind];
   const deployed = Boolean(service.pdServiceId);
@@ -310,17 +310,61 @@ function ServiceCard({
         : "Open in PagerDuty ↗";
 
   return (
-    <Surface className={`px-3 py-2.5 rounded-lg ${ring}`}>
+    <Surface className={`relative group px-3 py-2.5 rounded-lg ${ring}`}>
+      <button
+        type="button"
+        onClick={() => onDelete(service)}
+        className="absolute top-1 right-1 p-1 rounded opacity-0 group-hover:opacity-70 hover:!opacity-100 hover:bg-kumo-control transition-opacity cursor-pointer"
+        aria-label={`Delete ${service.name}`}
+        title="Delete service"
+      >
+        <XIcon size={12} className="text-kumo-default" />
+      </button>
       <div className="flex items-start gap-2">
-        <Icon size={16} className="text-kumo-accent mt-0.5 shrink-0" />
+        {deployed ? (
+          <button
+            type="button"
+            onClick={() => onForceDue(service)}
+            className="text-kumo-accent mt-0.5 shrink-0 hover:opacity-60 transition-opacity cursor-pointer"
+            aria-label={`Force ${service.name} due`}
+            title="Click to force due (demo)"
+          >
+            <Icon size={16} />
+          </button>
+        ) : (
+          <Icon size={16} className="text-kumo-accent mt-0.5 shrink-0" />
+        )}
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <Text size="sm" bold>
               {service.name}
             </Text>
-            <Badge variant="secondary">
-              {cadenceLabel(service.cadenceDays)}
-            </Badge>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => onTogglePriority(service)}
+                className="cursor-pointer hover:opacity-70 transition-opacity"
+                aria-label={
+                  service.priority === "high"
+                    ? `${service.name} is high priority. Click to demote.`
+                    : `${service.name} is default priority. Click to mark high.`
+                }
+                title={
+                  service.priority === "high"
+                    ? "🔥 High priority — pages through busy calendar windows. Click to demote to default."
+                    : "Default priority — defers when you're in a meeting. Click to mark high (always pages)."
+                }
+              >
+                {service.priority === "high" ? (
+                  <Badge variant="destructive">🔥 High</Badge>
+                ) : (
+                  <Badge variant="secondary">Default</Badge>
+                )}
+              </button>
+              <Badge variant="secondary">
+                {cadenceLabel(service.cadenceDays)}
+              </Badge>
+            </div>
           </div>
           <Text size="xs" variant="secondary">
             {service.kind}
@@ -370,46 +414,7 @@ function ServiceCard({
               </a>
             )}
 
-            {deployed && open && (
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => onResolve(service)}
-              >
-                Mark fulfilled
-              </Button>
-            )}
 
-            {deployed && !open && (
-              <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => onPageNow(service)}
-                >
-                  Page me now
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onResolve(service)}
-                >
-                  Mark fulfilled
-                </Button>
-              </>
-            )}
-
-            {devMode && deployed && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onForceDue(service)}
-                title="Force due & sweep (dev only)"
-                aria-label="Force due"
-              >
-                ⚡
-              </Button>
-            )}
           </div>
         </div>
       </div>
@@ -423,11 +428,10 @@ function LifeOpsSidebar({
   webhookUrl,
   calendarStatus,
   googleConnected,
-  devMode,
   onDeploy,
-  onPageNow,
-  onResolve,
   onForceDue,
+  onTogglePriority,
+  onDelete,
   onRunSweep,
   onVerifyWebhook,
   onConnectGoogle,
@@ -439,11 +443,10 @@ function LifeOpsSidebar({
   webhookUrl: string | undefined;
   calendarStatus: CalendarStatus | undefined;
   googleConnected: boolean;
-  devMode: boolean;
   onDeploy: (s: LifeService) => void;
-  onPageNow: (s: LifeService) => void;
-  onResolve: (s: LifeService) => void;
   onForceDue: (s: LifeService) => void;
+  onTogglePriority: (s: LifeService) => void;
+  onDelete: (s: LifeService) => void;
   onRunSweep: () => void;
   onVerifyWebhook: () => void;
   onConnectGoogle: (token: string) => void;
@@ -495,11 +498,10 @@ function LifeOpsSidebar({
             <ServiceCard
               key={s.id}
               service={s}
-              devMode={devMode}
               onDeploy={onDeploy}
-              onPageNow={onPageNow}
-              onResolve={onResolve}
               onForceDue={onForceDue}
+              onTogglePriority={onTogglePriority}
+              onDelete={onDelete}
             />
           ))
         )}
@@ -702,7 +704,7 @@ function LifeOpsSidebar({
           </Button>
           <div className="text-center">
             <Text size="xs" variant="secondary">
-              auto-sweeps every minute
+              auto-sweeps every 15s
             </Text>
           </div>
         </div>
@@ -722,10 +724,6 @@ function Chat() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toasts = useKumoToastManager();
-  // Dev mode: append ?dev=1 to the URL to reveal the ⚡ "force due" button on cards.
-  const devMode =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).has("dev");
 
   const agent = useAgent<ChatAgent, ChatAgentState>({
     agent: "ChatAgent",
@@ -956,7 +954,46 @@ function Chat() {
         webhookUrl={agent.state?.pdWebhookUrl}
         calendarStatus={agent.state?.calendarStatus}
         googleConnected={Boolean(agent.state?.googleAccessToken)}
-        devMode={devMode}
+        onDelete={async (s) => {
+          try {
+            await agent.stub.removeLifeService(s.id);
+            toasts.add({
+              title: `Removed: ${s.name}`,
+              description: s.pdServiceId
+                ? "Local card + PagerDuty service deleted."
+                : "Removed from list.",
+              timeout: 3000
+            });
+          } catch (e) {
+            toasts.add({
+              title: "Delete failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
+        }}
+        onTogglePriority={async (s) => {
+          try {
+            const res = await agent.stub.toggleServicePriority(s.id);
+            toasts.add({
+              title:
+                res.priority === "high"
+                  ? `🔥 ${s.name}: high priority`
+                  : `${s.name}: default priority`,
+              description:
+                res.priority === "high"
+                  ? "Will page through busy calendar windows."
+                  : "Will defer when you're in a meeting.",
+              timeout: 3500
+            });
+          } catch (e) {
+            toasts.add({
+              title: "Priority toggle failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 5000
+            });
+          }
+        }}
         onForceDue={async (s) => {
           try {
             const res = await agent.stub.demoForceDueAndSweep(s.id);
@@ -1138,54 +1175,6 @@ function Chat() {
             ]
           });
         }}
-        onPageNow={async (s) => {
-          try {
-            const res = await agent.stub.pageNowLifeService(s.id);
-            if (res && "error" in res) {
-              toasts.add({
-                title: "Page failed",
-                description: String(res.error),
-                timeout: 6000
-              });
-            } else if (res && "alreadyOpen" in res) {
-              toasts.add({
-                title: "Already paged",
-                description: `Incident open for ${s.name}`,
-                timeout: 3000
-              });
-            } else {
-              toasts.add({
-                title: `Paged: ${s.name}`,
-                description: "Check your phone — PagerDuty is doing the rest.",
-                timeout: 4000
-              });
-            }
-          } catch (e) {
-            toasts.add({
-              title: "Page failed",
-              description: e instanceof Error ? e.message : String(e),
-              timeout: 6000
-            });
-          }
-        }}
-        onResolve={async (s) => {
-          try {
-            await agent.stub.resolveLifeService(s.id);
-            toasts.add({
-              title: `Marked fulfilled: ${s.name}`,
-              description: s.activeDedupKey
-                ? "Incident resolved, SLO clock reset."
-                : "SLO clock reset.",
-              timeout: 3000
-            });
-          } catch (e) {
-            toasts.add({
-              title: "Resolve failed",
-              description: e instanceof Error ? e.message : String(e),
-              timeout: 6000
-            });
-          }
-        }}
       />
       <div
         className="flex-1 flex flex-col relative min-w-0"
@@ -1225,10 +1214,7 @@ function Chat() {
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
-              onClick={async () => {
-                await agent.stub.clearLifeServices();
-                clearHistory();
-              }}
+              onClick={clearHistory}
             >
               Clear
             </Button>

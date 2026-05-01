@@ -46,6 +46,11 @@ export type LifeService = {
   acknowledgedAt?: number;
   /** When set, the cadence sweep skips this service until now >= snoozedUntil. */
   snoozedUntil?: number;
+  /**
+   * "high" pages through busy calendar windows. "default" (or unset) defers
+   * when the user is in a meeting. User-toggled per service — never auto.
+   */
+  priority?: "high" | "default";
 };
 
 export type SweepOutcome =
@@ -128,15 +133,29 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
   initialState: ChatAgentState = { services: [] };
 
   onStart() {
-    // Cadence sweep — every minute (demo-friendly; switch to "0 9 * * *"
-    // for production daily). Idempotent so repeated wakes don't pile up.
+    // Cadence sweep — runs every ~15s via a self-perpetuating chain
+    // (each tickCadence schedules the next one). On wake, clean up any
+    // legacy cron-based sweeps and make sure exactly one delay-based
+    // tick is queued.
     try {
-      const schedules = this.getSchedules();
-      const hasSweep = schedules.some(
-        (s) => (s as { callback?: string }).callback === "tickCadence"
+      const schedules = this.getSchedules() as Array<{
+        id?: string;
+        callback?: string;
+        type?: string;
+        cron?: string;
+      }>;
+      const sweepSchedules = schedules.filter(
+        (s) => s.callback === "tickCadence"
       );
-      if (!hasSweep) {
-        this.schedule("* * * * *", "tickCadence", null, { idempotent: true });
+      // Drop any legacy cron schedules ("* * * * *" or similar).
+      for (const s of sweepSchedules) {
+        if (s.cron && s.id) {
+          this.cancelSchedule(s.id);
+        }
+      }
+      const upcomingDelays = sweepSchedules.filter((s) => !s.cron);
+      if (upcomingDelays.length === 0) {
+        this.schedule(15, "tickCadence", null);
       }
     } catch (err) {
       console.error("[life-ops] failed to schedule cadence sweep:", err);
@@ -167,6 +186,34 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
   @callable()
   async removeServer(serverId: string) {
     await this.removeMcpServer(serverId);
+  }
+
+  @callable()
+  async removeLifeService(serviceId: string) {
+    const svc = this.state.services.find((s) => s.id === serviceId);
+    if (!svc) return { removed: false };
+    if (svc.pdServiceId) {
+      try {
+        await this.pd().deleteService(svc.pdServiceId);
+      } catch (err) {
+        console.error("PD delete failed (continuing):", err);
+      }
+    }
+    this.setState({
+      ...this.state,
+      services: this.state.services.filter((s) => s.id !== serviceId)
+    });
+    return { removed: true, id: serviceId };
+  }
+
+  @callable()
+  async toggleServicePriority(serviceId: string) {
+    const svc = this.state.services.find((s) => s.id === serviceId);
+    if (!svc) throw new Error(`No life service with id ${serviceId}`);
+    const next: "high" | "default" =
+      svc.priority === "high" ? "default" : "high";
+    this.patchService(serviceId, { priority: next });
+    return { id: serviceId, priority: next };
   }
 
   @callable()
@@ -447,8 +494,8 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
         continue;
       }
 
-      // It's due. Calendar gate: busy → defer; free → page.
-      if (busyNow && deferTarget) {
+      // It's due. Calendar gate: busy → defer (unless high priority).
+      if (busyNow && deferTarget && svc.priority !== "high") {
         this.patchService(svc.id, { snoozedUntil: deferTarget });
         deferredNames.push(svc.name);
         perService.push({
@@ -517,6 +564,22 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
           at: now
         })
       );
+    }
+
+    // Schedule the next tick. Self-perpetuating loop so we keep sweeping
+    // every ~15s without relying on minute-granularity cron. Cancel any
+    // other pending tickCadence schedules first so manual + auto sweeps
+    // don't pile up.
+    try {
+      const pending = (
+        this.getSchedules() as Array<{ id?: string; callback?: string }>
+      ).filter((s) => s.callback === "tickCadence" && s.id);
+      for (const s of pending) {
+        if (s.id) this.cancelSchedule(s.id);
+      }
+      this.schedule(15, "tickCadence", null);
+    } catch (err) {
+      console.error("[life-ops] failed to schedule next tick:", err);
     }
   }
 
@@ -1011,7 +1074,7 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
 ${services
   .map(
     (s) =>
-      `- ${s.name} (id: ${s.id}, kind: ${s.kind}, cadence: ${s.cadenceDays}d${s.anchorDate ? `, anchorDate: ${s.anchorDate}` : ""}${s.snoozedUntil && s.snoozedUntil > Date.now() ? `, snoozedUntil: ${new Date(s.snoozedUntil).toISOString()}` : ""}${s.notes ? `, notes: "${s.notes}"` : ""}, deployed: ${s.pdServiceId ? "yes" : "no"})`
+      `- ${s.name} (id: ${s.id}, kind: ${s.kind}, cadence: ${s.cadenceDays}d${s.anchorDate ? `, anchorDate: ${s.anchorDate}` : ""}${s.priority ? `, priority: ${s.priority}` : ""}${s.snoozedUntil && s.snoozedUntil > Date.now() ? `, snoozedUntil: ${new Date(s.snoozedUntil).toISOString()}` : ""}${s.notes ? `, notes: "${s.notes}"` : ""}, deployed: ${s.pdServiceId ? "yes" : "no"})`
   )
   .join("\n")}
 
@@ -1126,12 +1189,14 @@ Each service gets its own EP with its own witty name; reuse is not a feature her
 
 ## Calendar-aware paging (multi-system reasoning)
 
-If Google Calendar is connected, the cadence sweep checks the calendar before paging. **Rule: when the user is in a meeting (busy now), nothing pages.** Overdue services get snoozed until 30 min after the busy window ends; the sweep retries every minute and fires the moment the user is free.
+If Google Calendar is connected, the cadence sweep checks the calendar before paging. **Rule: when the user is in a meeting, default-priority services are deferred. Services explicitly marked priority="high" page through anyway.** Overdue default services get snoozed until 30 min after the busy window ends; the sweep retries every minute.
 
-When the user asks about why something didn't page or what's next, call \`check_calendar_today\` to read current busy windows. Articulate the reasoning out loud — that's the whole point.
+When the user asks about why something didn't page, call \`check_calendar_today\` to read current busy windows. Articulate the reasoning out loud — that's the whole point.
+
+When the user says something is **critical / important / must always cut through** (anniversaries, partner's birthday, P0s), call \`set_service_priority\` with priority="high". When they want to demote a noisy service, set priority="default". Default for new services is unset (= treated as default). Don't auto-promote anything; wait for the user to declare it.
 
 Example reasoning to articulate:
-*"📅 You're in 'Agents Day Lisbon' until 18:00 — Mom is overdue but I'm holding the page until you're free. Snoozed until 18:30. ⏸"*
+*"📅 You're in 'Agents Day Lisbon' until 18:00. Mom (default priority, weekly call) is overdue but I'm holding the page until 18:30. ⏸ — but I noticed Anniversary is also due today and you flagged it as high priority, so 🚨 paging through that one anyway."*
 
 ${getSchedulePrompt({ date: new Date() })}`,
       // Prune old tool calls to save tokens on long conversations
@@ -1246,20 +1311,10 @@ ${getSchedulePrompt({ date: new Date() })}`,
             id: z.string().describe("The id of the service to remove")
           }),
           execute: async ({ id }) => {
-            const svc = this.state.services.find((s) => s.id === id);
-            if (!svc) return { error: `No service ${id}` };
-            if (svc.pdServiceId) {
-              try {
-                await this.pd().deleteService(svc.pdServiceId);
-              } catch (err) {
-                console.error("PD delete failed (continuing):", err);
-              }
-            }
-            this.setState({
-              ...this.state,
-              services: this.state.services.filter((s) => s.id !== id)
-            });
-            return { removed: id };
+            const result = await this.removeLifeService(id);
+            return result.removed
+              ? { removed: id }
+              : { error: `No service ${id}` };
           }
         }),
 
@@ -1357,6 +1412,25 @@ ${getSchedulePrompt({ date: new Date() })}`,
                 error: err instanceof Error ? err.message : String(err)
               };
             }
+          }
+        }),
+
+        set_service_priority: tool({
+          description:
+            "Mark a Life Ops service as 'high' priority (will page through busy calendar windows — meetings, conferences, etc.) or 'default' (will be deferred until the user is free). Use this when the user says something is critical / important / must always cut through (anniversaries, partner's birthday, etc.) or wants to demote noise.",
+          inputSchema: z.object({
+            id: z.string().describe("The id of the Life Ops service"),
+            priority: z
+              .enum(["high", "default"])
+              .describe(
+                "high = pages through busy windows; default = defers when busy"
+              )
+          }),
+          execute: async ({ id, priority }) => {
+            const svc = this.state.services.find((s) => s.id === id);
+            if (!svc) return { error: `No service ${id}` };
+            this.patchService(id, { priority });
+            return { id, name: svc.name, priority };
           }
         }),
 
