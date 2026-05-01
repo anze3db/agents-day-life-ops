@@ -4,6 +4,12 @@
 
 Built on Cloudflare Workers + the [Agents SDK](https://developers.cloudflare.com/agents/), with Anthropic Claude for the agent, PagerDuty for actual alerting, and Google Calendar for context-aware paging.
 
+## Demo
+
+https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD
+
+> The video is checked into the repo at [`docs/demo.mov`](./docs/demo.mov). For inline playback in the rendered README, drag-and-drop the file into the GitHub web editor for this README — GitHub will auto-host it and replace the placeholder URL above with a real `user-attachments` URL that embeds as a player. Or convert to `.mp4` and use `<video>` / a raw URL.
+
 ## The pitch
 
 ```

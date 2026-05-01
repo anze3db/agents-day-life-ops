@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 64" fill="none" role="img" aria-label="Life Ops">
+  <!-- Logomark on the left -->
+  <rect width="64" height="64" rx="14" fill="#0F172A"/>
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="none" stroke="#1F2937" stroke-width="1"/>
+  <path
+    d="M32 48 C32 48 13 36 13 23 C13 17 18 13 23 14 C27 14 30 17 32 20 C34 17 37 14 41 14 C46 13 51 17 51 23 C51 36 32 48 32 48 Z"
+    fill="#F8FAFC"
+  />
+  <circle cx="49" cy="15" r="9" fill="#0F172A"/>
+  <circle cx="49" cy="15" r="6" fill="#EF4444"/>
+  <circle cx="49" cy="15" r="3" fill="#FCA5A5"/>
+
+  <!-- Wordmark -->
+  <g transform="translate(82, 0)">
+    <text
+      x="0"
+      y="36"
+      font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
+      font-size="26"
+      font-weight="700"
+      letter-spacing="-0.5"
+      fill="#0F172A"
+    >Life Ops</text>
+    <text
+      x="0"
+      y="54"
+      font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+      font-size="10"
+      letter-spacing="2"
+      fill="#64748B"
+    >SRE FOR THE PEOPLE YOU CARE ABOUT</text>
+  </g>
+</svg>

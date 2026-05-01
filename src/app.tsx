@@ -1195,9 +1195,19 @@ function Chat() {
       <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-lg font-semibold text-kumo-default">
-              SRE for the people you care about
-            </h1>
+            <img
+              src="/logo.svg"
+              alt="Life Ops"
+              className="h-8 w-8 shrink-0"
+            />
+            <div className="flex flex-col">
+              <h1 className="text-lg font-semibold text-kumo-default leading-tight">
+                Life Ops
+              </h1>
+              <Text size="xs" variant="secondary">
+                SRE for the people you care about
+              </Text>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
