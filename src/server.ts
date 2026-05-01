@@ -1,4 +1,4 @@
-import { createWorkersAI } from "workers-ai-provider";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { callable, routeAgentRequest, type Schedule } from "agents";
 import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
@@ -26,6 +26,8 @@ export type LifeService = {
   pdServiceId?: string;
   pdServiceUrl?: string;
   pdIntegrationKey?: string;
+  pdEscalationPolicyId?: string;
+  pdEscalationPolicyUrl?: string;
 };
 
 export type ChatAgentState = {
@@ -105,42 +107,17 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
     return new PagerDutyClient(this.env.PAGERDUTY_REST_TOKEN);
   }
 
-  /**
-   * Lazily provision the user-level PD primitives (user lookup, escalation
-   * policy). Idempotent — reuses cached ids in state.
-   */
-  private async ensurePdAccountSetup(): Promise<{
-    pdUserId: string;
-    pdEscalationPolicyId: string;
-  }> {
-    let { pdUserId, pdEscalationPolicyId } = this.state;
-    const pd = this.pd();
-
-    if (!pdUserId) {
-      const user = await pd.getUserByEmail(this.env.PAGERDUTY_USER_EMAIL);
-      if (!user) {
-        throw new Error(
-          `No PagerDuty user found for email ${this.env.PAGERDUTY_USER_EMAIL}`
-        );
-      }
-      pdUserId = user.id;
-      this.setState({ ...this.state, pdUserId });
+  /** Resolve the primary user's PD id. Idempotent — caches in state. */
+  private async ensurePdUserId(): Promise<string> {
+    if (this.state.pdUserId) return this.state.pdUserId;
+    const user = await this.pd().getUserByEmail(this.env.PAGERDUTY_USER_EMAIL);
+    if (!user) {
+      throw new Error(
+        `No PagerDuty user found for email ${this.env.PAGERDUTY_USER_EMAIL}`
+      );
     }
-
-    if (!pdEscalationPolicyId) {
-      const ep = await pd.createEscalationPolicy({
-        name: "Life Ops",
-        description:
-          "Five-nines uptime for the people who put up with your two-nines availability.",
-        userId: pdUserId,
-        delayMinutes: 30
-      });
-      pdEscalationPolicyId = ep.id;
-      console.log(`[life-ops] created EP ${ep.id} -> ${ep.html_url}`);
-      this.setState({ ...this.state, pdEscalationPolicyId });
-    }
-
-    return { pdUserId, pdEscalationPolicyId };
+    this.setState({ ...this.state, pdUserId: user.id });
+    return user.id;
   }
 
   @callable()
@@ -163,14 +140,18 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
   }
 
   @callable()
-  async deployLifeService(serviceId: string) {
+  async deployLifeService(serviceId: string, escalationPolicyId: string) {
     const svc = this.state.services.find((s) => s.id === serviceId);
     if (!svc) throw new Error(`No life service with id ${serviceId}`);
     if (svc.pdServiceId && svc.pdIntegrationKey) {
       return { alreadyDeployed: true, service: svc };
     }
+    if (!escalationPolicyId) {
+      throw new Error(
+        "An escalation policy id is required. Create one with create_escalation_policy first."
+      );
+    }
 
-    const { pdEscalationPolicyId } = await this.ensurePdAccountSetup();
     const pd = this.pd();
 
     const description = [
@@ -185,7 +166,7 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
     const pdSvc = await pd.createService({
       name: `Life Ops · ${svc.name}`,
       description,
-      escalationPolicyId: pdEscalationPolicyId
+      escalationPolicyId
     });
     console.log(
       `[life-ops] created service ${pdSvc.id} for "${svc.name}" -> ${pdSvc.html_url}`
@@ -199,7 +180,8 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
       ...svc,
       pdServiceId: pdSvc.id,
       pdServiceUrl: pdSvc.html_url,
-      pdIntegrationKey: integration.integration_key
+      pdIntegrationKey: integration.integration_key,
+      pdEscalationPolicyId: escalationPolicyId
     };
     this.setState({
       ...this.state,
@@ -212,7 +194,7 @@ export class ChatAgent extends AIChatAgent<Env, ChatAgentState> {
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
-    const workersai = createWorkersAI({ binding: this.env.AI });
+    const anthropic = createAnthropic({ apiKey: this.env.ANTHROPIC_API_KEY });
 
     const services = this.state.services;
     const servicesContext =
@@ -229,9 +211,7 @@ ${services
 CRITICAL: If the user adds context about someone/something already in this list — clarifying a cadence, renaming, adding a note, mentioning the person again — use \`update_life_service\` with the matching id. NEVER call \`add_life_service\` for an entry that already exists here. Match by name case-insensitively; "mom", "Mom", "my mom" all refer to the same service.`;
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
-        sessionAffinity: this.sessionAffinity
-      }),
+      model: anthropic("claude-haiku-4-5-20251001"),
       system: `You are Life Ops — an SRE-style agent for someone's personal life. The pitch is tongue-in-cheek: PagerDuty for the people and habits that matter. Your current job is **onboarding**: capture what the user cares about as structured "services" with cadence targets (their personal SLOs).
 
 ${servicesContext}
@@ -259,7 +239,36 @@ Service kinds:
 
 Add only what the user explicitly mentions. Don't speculate or pad the list. Use \`update_life_service\` to refine an entry after a follow-up answer (e.g. setting cadenceDays once they confirm). Use \`remove_life_service\` if they say "actually, drop X".
 
-After a service has a confirmed cadence, you can offer to wire it into PagerDuty by calling \`deploy_life_service\` with its id. Mention it casually after the brain-dump is settled — something like "Want me to wire these up to PagerDuty so you actually get paged?" — then deploy the ones the user agrees to. Don't deploy without confirmation. Each service in the "Currently tracked services" list above shows whether it's already deployed by whether you've seen a deploy result for it; trust that — don't re-deploy.
+## Deploying to PagerDuty
+
+After a service has a confirmed cadence, you can offer to wire it into PagerDuty. The flow is **two steps per service**, in this exact order:
+
+1. **Ask about escalation, then call \`create_escalation_policy\`.** For each service, ask the user one short, conversational set of questions:
+   - "If you ignore the page, who should it escalate to? (yourself only / a name + email)"
+   - "How long before it escalates / times out? (default 30 min)"
+   - Then propose a witty policy **name** and **description** for their approval. Examples:
+     - Mom: name "Mom — Reply or Get Reported", description "Page the user. After 30 minutes of radio silence, page their sister. Filial piety has an SLA."
+     - Plants: name "Plants — They Will Wilt", description "Page the user. There is no escalation; the plants don't have HR."
+     - Anniversary: name "Anniversary — DEFCON 1", description "Page the user. After 5 minutes, page their spouse. After that, may god help you."
+   - If the user wants any tweaks, adjust before calling. Then call \`create_escalation_policy\`.
+
+2. **Then call \`deploy_life_service\`** with the service id and the escalation policy id you just got back.
+
+**ALWAYS ask about escalation before deploying — never skip step 1, never reuse an existing escalation policy without confirming with the user.** Each service in the "Currently tracked services" list above shows whether it's already deployed; trust that and don't re-deploy.
+
+If the user says "deploy them all with the same escalation," it's still OK to create one policy and deploy all services with that policy id — but get explicit confirmation of the shared policy first.
+
+### Escalation targets — important constraint
+
+PagerDuty can only escalate to **real users on this PD account**. You CANNOT escalate to an arbitrary email address — PD's notification system needs a user record. This means: **never ask the user to invite their mom/sister/girlfriend/spouse to PagerDuty just to enable escalation.** That's a ridiculous ask for a personal-life product.
+
+When the user wants to escalate to someone who isn't on their PD account, default to one of these in this order:
+
+1. **Just page them, no escalation.** Recommended for most personal services. The escalation field is optional — if the user says "Ana doesn't have PagerDuty," respond with something like: *"PD can only escalate to real PD users, and asking Ana to install PagerDuty for this is absurd. I'll set the policy to just page you — the wittiness still lands and the SLO still bites."*
+
+2. **"+alias" workaround for demos.** If the user wants to *show* the escalation chain working (e.g. for a demo), suggest using a "+alias" on their own email — e.g. myuser+sister@example.com — to create a second PD user that lands in their own inbox. Frame it as a demo trick, not a production setup.
+
+**Do not** ask the user to invite real people to their PagerDuty account. If they specifically say "yes I want to invite them," then proceed — but don't suggest it yourself.
 
 ${getSchedulePrompt({ date: new Date() })}`,
       // Prune old tool calls to save tokens on long conversations
@@ -376,15 +385,100 @@ ${getSchedulePrompt({ date: new Date() })}`,
           }
         }),
 
+        create_escalation_policy: tool({
+          description:
+            "Create a PagerDuty escalation policy for a single Life Ops service. Always call this BEFORE deploy_life_service. The first rule pages the user; if escalateToEmail is provided, a second rule pages that person after delayMinutes. Returns { id, url } — pass the id into deploy_life_service.",
+          inputSchema: z.object({
+            name: z
+              .string()
+              .describe(
+                "Short policy name. Make it witty and tied to the service, e.g. 'Mom — Reply or Get Reported', 'Plants — They Will Wilt'"
+              ),
+            description: z
+              .string()
+              .describe(
+                "1-2 sentence witty description shown in PD. Tongue-in-cheek SRE flavor."
+              ),
+            delayMinutes: z
+              .number()
+              .int()
+              .positive()
+              .default(30)
+              .describe(
+                "Minutes to wait before escalating (or before policy times out). Default 30."
+              ),
+            escalateToEmail: z
+              .string()
+              .optional()
+              .describe(
+                "Optional PD-account email of someone to escalate to (spouse, sibling). Omit if user wants no escalation beyond themselves."
+              )
+          }),
+          execute: async ({
+            name,
+            description,
+            delayMinutes,
+            escalateToEmail
+          }) => {
+            try {
+              const pd = this.pd();
+              const primaryUserId = await this.ensurePdUserId();
+              const rules = [
+                { delayMinutes, targetUserIds: [primaryUserId] }
+              ];
+              if (escalateToEmail) {
+                const escUser = await pd.getUserByEmail(escalateToEmail);
+                if (!escUser) {
+                  return {
+                    error: `No PagerDuty user matches ${escalateToEmail}. PD escalation can only target real users on this account. Two options: (1) skip escalation entirely so the policy just pages the primary user (recommended — DO NOT ask the user to invite a real person), or (2) for demo purposes, add a "+alias" to the primary user's own email (e.g. ${this.env.PAGERDUTY_USER_EMAIL.replace("@", "+spouse@")}) and use that as escalateToEmail. Suggest these to the user instead of creating a real PagerDuty account for someone else.`
+                  };
+                }
+                rules.push({
+                  delayMinutes,
+                  targetUserIds: [escUser.id]
+                });
+              } else {
+                // Always create at least 2 rules so we pass PD's
+                // "Service has an escalation policy with 2+ unique levels"
+                // service standard. Second rule re-pages the primary user
+                // after a longer delay — acts as a "did you really see the
+                // first one?" nudge.
+                rules.push({
+                  delayMinutes: Math.max(delayMinutes * 2, 60),
+                  targetUserIds: [primaryUserId]
+                });
+              }
+              const ep = await pd.createEscalationPolicy({
+                name,
+                description,
+                rules
+              });
+              console.log(`[life-ops] created EP ${ep.id} -> ${ep.html_url}`);
+              return { id: ep.id, url: ep.html_url };
+            } catch (err) {
+              return {
+                error: err instanceof Error ? err.message : String(err)
+              };
+            }
+          }
+        }),
+
         deploy_life_service: tool({
           description:
-            "Provision a Life Ops service in PagerDuty: creates a PD service + Events API integration tied to the user's escalation policy. The escalation policy is created lazily on first deploy. Returns the updated service with pdServiceId and pdIntegrationKey set. Use this once the user has confirmed cadence and is ready to wire alerting.",
+            "Provision a Life Ops service in PagerDuty: creates a PD service + Events API integration, tied to the escalation policy you created. ALWAYS call create_escalation_policy first to get an id. Use this once cadence is confirmed and the user has approved an escalation policy.",
           inputSchema: z.object({
-            id: z.string().describe("The id of the Life Ops service to deploy")
+            id: z
+              .string()
+              .describe("The id of the Life Ops service to deploy"),
+            escalationPolicyId: z
+              .string()
+              .describe(
+                "The PD escalation policy id (from create_escalation_policy)"
+              )
           }),
-          execute: async ({ id }) => {
+          execute: async ({ id, escalationPolicyId }) => {
             try {
-              return await this.deployLifeService(id);
+              return await this.deployLifeService(id, escalationPolicyId);
             } catch (err) {
               return {
                 error: err instanceof Error ? err.message : String(err)

@@ -60,28 +60,30 @@ export class PagerDutyClient {
   async createEscalationPolicy(input: {
     name: string;
     description?: string;
-    userId: string;
-    delayMinutes?: number;
+    rules: Array<{
+      delayMinutes: number;
+      targetUserIds: string[];
+    }>;
   }): Promise<{ id: string; html_url: string }> {
     const data = await this.rest<{
       escalation_policy: { id: string; html_url: string };
     }>("/escalation_policies", {
-        method: "POST",
-        body: {
-          escalation_policy: {
-            type: "escalation_policy",
-            name: input.name,
-            description: input.description,
-            escalation_rules: [
-              {
-                escalation_delay_in_minutes: input.delayMinutes ?? 30,
-                targets: [{ id: input.userId, type: "user_reference" }]
-              }
-            ]
-          }
+      method: "POST",
+      body: {
+        escalation_policy: {
+          type: "escalation_policy",
+          name: input.name,
+          description: input.description,
+          escalation_rules: input.rules.map((r) => ({
+            escalation_delay_in_minutes: r.delayMinutes,
+            targets: r.targetUserIds.map((id) => ({
+              id,
+              type: "user_reference"
+            }))
+          }))
         }
       }
-    );
+    });
     return data.escalation_policy;
   }
 

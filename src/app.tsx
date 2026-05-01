@@ -236,10 +236,9 @@ function ServiceCard({
   onDeploy
 }: {
   service: LifeService;
-  onDeploy: (id: string) => void;
+  onDeploy: (s: LifeService) => void;
 }) {
   const Icon = KIND_ICON[service.kind];
-  const [deploying, setDeploying] = useState(false);
   const deployed = Boolean(service.pdServiceId);
 
   return (
@@ -295,17 +294,9 @@ function ServiceCard({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={deploying}
-                onClick={async () => {
-                  setDeploying(true);
-                  try {
-                    await onDeploy(service.id);
-                  } finally {
-                    setDeploying(false);
-                  }
-                }}
+                onClick={() => onDeploy(service)}
               >
-                {deploying ? "Deploying…" : "Deploy to PagerDuty"}
+                Configure & deploy
               </Button>
             )}
           </div>
@@ -320,7 +311,7 @@ function LifeOpsSidebar({
   onDeploy
 }: {
   services: LifeService[];
-  onDeploy: (id: string) => void;
+  onDeploy: (s: LifeService) => void;
 }) {
   return (
     <aside className="w-72 shrink-0 border-r border-kumo-line bg-kumo-base flex flex-col">
@@ -518,37 +509,23 @@ function Chat() {
       agent.stub.backfillPdUrls().catch((e) => console.error(e));
     }
   }, [hasUnurledDeployment, connected, agent]);
-  const handleDeploy = useCallback(
-    async (id: string) => {
-      try {
-        const result = await agent.stub.deployLifeService(id);
-        if (result && "error" in result) {
-          toasts.add({
-            title: "Deploy failed",
-            description: String(result.error),
-            timeout: 6000
-          });
-        } else {
-          toasts.add({
-            title: "Deployed to PagerDuty",
-            description: "Service and Events API integration created.",
-            timeout: 4000
-          });
-        }
-      } catch (e) {
-        toasts.add({
-          title: "Deploy failed",
-          description: e instanceof Error ? e.message : String(e),
-          timeout: 6000
-        });
-      }
-    },
-    [agent, toasts]
-  );
 
   return (
     <div className="flex h-screen bg-kumo-elevated">
-      <LifeOpsSidebar services={services} onDeploy={handleDeploy} />
+      <LifeOpsSidebar
+        services={services}
+        onDeploy={(s) => {
+          sendMessage({
+            role: "user",
+            parts: [
+              {
+                type: "text",
+                text: `Wire up "${s.name}" to PagerDuty — ask me about escalation first, then deploy.`
+              }
+            ]
+          });
+        }}
+      />
       <div
         className="flex-1 flex flex-col relative min-w-0"
         onDragOver={handleDragOver}
