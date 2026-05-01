@@ -6,7 +6,7 @@ Built on Cloudflare Workers + the [Agents SDK](https://developers.cloudflare.com
 
 ## Demo
 
-https://github.com/anze3db/agents-day-life-ops/raw/refs/heads/main/docs/demo.mov
+https://github.com/user-attachments/assets/5adea511-175b-4c2b-bd49-401baf377c5e
 
 ## The pitch
 
