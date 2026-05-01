@@ -2,7 +2,15 @@ import { Suspense, useCallback, useState, useEffect, useRef } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
-import type { ChatAgent, ChatAgentState, LifeService } from "./server";
+import type {
+  ChatAgent,
+  ChatAgentState,
+  LifeService,
+  CadenceSweepResult,
+  CalendarStatus,
+  SweepServiceResult,
+  SweepOutcome
+} from "./server";
 import {
   Badge,
   Button,
@@ -231,18 +239,78 @@ function cadenceLabel(days: number): string {
   return `every ${days}d`;
 }
 
+function daysSince(ts?: number): string | null {
+  if (!ts) return null;
+  const d = Math.floor((Date.now() - ts) / 86_400_000);
+  if (d <= 0) return "today";
+  if (d === 1) return "1 day ago";
+  return `${d}d ago`;
+}
+
+function outcomeIcon(o: SweepOutcome): string {
+  switch (o) {
+    case "paged":
+      return "🚨";
+    case "deferred":
+      return "⏸";
+    case "snoozed":
+      return "💤";
+    case "open":
+      return "🔥";
+    case "idle":
+      return "🟢";
+    case "not-deployed":
+      return "⚙️";
+    case "error":
+      return "⚠️";
+  }
+}
+
 function ServiceCard({
   service,
-  onDeploy
+  onDeploy,
+  onPageNow,
+  onResolve,
+  onForceDue
 }: {
   service: LifeService;
   onDeploy: (s: LifeService) => void;
+  onPageNow: (s: LifeService) => void;
+  onResolve: (s: LifeService) => void;
+  onForceDue: (s: LifeService) => void;
 }) {
   const Icon = KIND_ICON[service.kind];
   const deployed = Boolean(service.pdServiceId);
+  const open = Boolean(service.activeDedupKey);
+  const acked = Boolean(service.acknowledgedAt);
+  const snoozed =
+    Boolean(service.snoozedUntil) && service.snoozedUntil! > Date.now();
+  const lastLabel = daysSince(service.lastFulfilled);
+
+  const ring =
+    open && !acked
+      ? "ring-2 ring-kumo-danger"
+      : open && acked
+        ? "ring-2 ring-kumo-warning"
+        : "ring ring-kumo-line";
+
+  const badgeVariant: "primary" | "secondary" | "destructive" =
+    open && !acked ? "destructive" : open && acked ? "secondary" : "primary";
+  const dotClass =
+    open && !acked
+      ? "text-kumo-danger"
+      : open && acked
+        ? "text-kumo-warning"
+        : "text-kumo-success";
+  const badgeLabel =
+    open && !acked
+      ? "Incident open ↗"
+      : open && acked
+        ? "Acknowledged ↗"
+        : "Open in PagerDuty ↗";
 
   return (
-    <Surface className="px-3 py-2.5 rounded-lg ring ring-kumo-line">
+    <Surface className={`px-3 py-2.5 rounded-lg ${ring}`}>
       <div className="flex items-start gap-2">
         <Icon size={16} className="text-kumo-accent mt-0.5 shrink-0" />
         <div className="min-w-0 flex-1">
@@ -256,47 +324,90 @@ function ServiceCard({
           </div>
           <Text size="xs" variant="secondary">
             {service.kind}
+            {service.anchorDate && ` · ${service.anchorDate}`}
+            {lastLabel && ` · last: ${lastLabel}`}
           </Text>
           {service.notes && (
             <Text size="xs" variant="secondary">
               {service.notes}
             </Text>
           )}
-          <div className="flex items-center gap-2 mt-2">
-            {deployed ? (
-              service.pdServiceUrl ? (
-                <a
-                  href={service.pdServiceUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="no-underline"
-                >
-                  <Badge variant="primary">
-                    <CircleIcon
-                      size={8}
-                      weight="fill"
-                      className="mr-1 text-kumo-success"
-                    />
-                    Open in PagerDuty ↗
-                  </Badge>
-                </a>
-              ) : (
-                <Badge variant="primary">
-                  <CircleIcon
-                    size={8}
-                    weight="fill"
-                    className="mr-1 text-kumo-success"
-                  />
-                  Deployed
-                </Badge>
-              )
-            ) : (
+          {snoozed && service.snoozedUntil && (
+            <Text size="xs" variant="secondary">
+              ⏸ deferred until{" "}
+              {new Date(service.snoozedUntil).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit"
+              })}
+            </Text>
+          )}
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            {!deployed && (
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => onDeploy(service)}
               >
-                Configure & deploy
+                Deploy
+              </Button>
+            )}
+
+            {deployed && service.pdServiceUrl && (
+              <a
+                href={service.pdServiceUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="no-underline"
+              >
+                <Badge variant={badgeVariant}>
+                  <CircleIcon
+                    size={8}
+                    weight="fill"
+                    className={`mr-1 ${dotClass}`}
+                  />
+                  {badgeLabel}
+                </Badge>
+              </a>
+            )}
+
+            {deployed && open && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => onResolve(service)}
+              >
+                Mark fulfilled
+              </Button>
+            )}
+
+            {deployed && !open && (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onPageNow(service)}
+                >
+                  Page me now
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onResolve(service)}
+                >
+                  Mark fulfilled
+                </Button>
+              </>
+            )}
+
+            {devMode && deployed && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onForceDue(service)}
+                title="Force due & sweep (dev only)"
+                aria-label="Force due"
+              >
+                ⚡
               </Button>
             )}
           </div>
@@ -308,11 +419,56 @@ function ServiceCard({
 
 function LifeOpsSidebar({
   services,
-  onDeploy
+  lastSweep,
+  webhookUrl,
+  calendarStatus,
+  googleConnected,
+  devMode,
+  onDeploy,
+  onPageNow,
+  onResolve,
+  onForceDue,
+  onRunSweep,
+  onVerifyWebhook,
+  onConnectGoogle,
+  onDisconnectGoogle,
+  onRefreshCalendar
 }: {
   services: LifeService[];
+  lastSweep: CadenceSweepResult | undefined;
+  webhookUrl: string | undefined;
+  calendarStatus: CalendarStatus | undefined;
+  googleConnected: boolean;
+  devMode: boolean;
   onDeploy: (s: LifeService) => void;
+  onPageNow: (s: LifeService) => void;
+  onResolve: (s: LifeService) => void;
+  onForceDue: (s: LifeService) => void;
+  onRunSweep: () => void;
+  onVerifyWebhook: () => void;
+  onConnectGoogle: (token: string) => void;
+  onDisconnectGoogle: () => void;
+  onRefreshCalendar: () => void;
 }) {
+  const [tokenInput, setTokenInput] = useState("");
+  const [showTokenForm, setShowTokenForm] = useState(false);
+  const [showSweepDetails, setShowSweepDetails] = useState(false);
+  // Tick once per second so "Xs ago" stays live without depending on state.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const sweepRel = lastSweep ? daysSince(lastSweep.at) : null;
+  const sweepSecs = lastSweep
+    ? Math.max(1, Math.floor((Date.now() - lastSweep.at) / 1000))
+    : null;
+  const sweepLabel = !lastSweep
+    ? "no sweeps yet"
+    : sweepSecs !== null && sweepSecs < 60
+      ? `${sweepSecs}s ago`
+      : sweepRel || "recent";
+
   return (
     <aside className="w-72 shrink-0 border-r border-kumo-line bg-kumo-base flex flex-col">
       <div className="px-4 py-4 border-b border-kumo-line flex items-center justify-between">
@@ -336,9 +492,220 @@ function LifeOpsSidebar({
           </div>
         ) : (
           services.map((s) => (
-            <ServiceCard key={s.id} service={s} onDeploy={onDeploy} />
+            <ServiceCard
+              key={s.id}
+              service={s}
+              devMode={devMode}
+              onDeploy={onDeploy}
+              onPageNow={onPageNow}
+              onResolve={onResolve}
+              onForceDue={onForceDue}
+            />
           ))
         )}
+      </div>
+      <div className="px-3 py-3 border-t border-kumo-line space-y-3">
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <Text size="xs" variant="secondary">
+              📅 Calendar:{" "}
+              <span
+                className={
+                  googleConnected
+                    ? "text-kumo-success"
+                    : "text-kumo-inactive"
+                }
+              >
+                {googleConnected ? "✓ connected" : "not connected"}
+              </span>
+            </Text>
+          </div>
+          {googleConnected && calendarStatus && (
+            <Text size="xs" variant="secondary">
+              {calendarStatus.busyNow ? (
+                <>
+                  Busy:{" "}
+                  <span className="text-kumo-default">
+                    {calendarStatus.busyTitle}
+                  </span>{" "}
+                  until{" "}
+                  {calendarStatus.busyUntil &&
+                    new Date(calendarStatus.busyUntil).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit"
+                    })}
+                </>
+              ) : (
+                "Free now"
+              )}
+            </Text>
+          )}
+          {!googleConnected && !showTokenForm && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowTokenForm(true)}
+              className="w-full"
+            >
+              Connect Google Calendar
+            </Button>
+          )}
+          {!googleConnected && showTokenForm && (
+            <div className="space-y-1.5">
+              <input
+                type="password"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                placeholder="OAuth access token"
+                className="w-full px-2 py-1 text-xs rounded border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent font-mono"
+              />
+              <div className="flex gap-1">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => {
+                    if (tokenInput.trim()) {
+                      onConnectGoogle(tokenInput.trim());
+                      setTokenInput("");
+                      setShowTokenForm(false);
+                    }
+                  }}
+                  className="flex-1"
+                  disabled={!tokenInput.trim()}
+                >
+                  Connect
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setTokenInput("");
+                    setShowTokenForm(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+              <div className="text-center">
+                <a
+                  href="https://developers.google.com/oauthplayground/#step1&scopes=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.events.readonly"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs underline text-kumo-subtle"
+                >
+                  get a token from OAuth Playground ↗
+                </a>
+              </div>
+            </div>
+          )}
+          {googleConnected && (
+            <div className="flex gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onRefreshCalendar}
+                className="flex-1"
+              >
+                Refresh
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onDisconnectGoogle}
+              >
+                Disconnect
+              </Button>
+            </div>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <Text size="xs" variant="secondary">
+              Webhook:{" "}
+              <span
+                className={
+                  webhookUrl ? "text-kumo-success" : "text-kumo-inactive"
+                }
+              >
+                {webhookUrl ? "✓ subscribed" : "not set up"}
+              </span>
+            </Text>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onVerifyWebhook}
+            className="w-full"
+          >
+            {webhookUrl ? "Re-verify webhook" : "Set up webhook"}
+          </Button>
+        </div>
+        <div className="space-y-1.5">
+          <button
+            type="button"
+            onClick={() => setShowSweepDetails((v) => !v)}
+            className="w-full text-left flex items-center justify-between gap-2 hover:opacity-80 cursor-pointer"
+            disabled={!lastSweep}
+          >
+            <Text size="xs" variant="secondary">
+              {sweepSecs !== null && sweepSecs < 3 && (
+                <span className="inline-block size-1.5 rounded-full bg-kumo-success mr-1.5 animate-pulse" />
+              )}
+              Sweep: <span className="text-kumo-default">{sweepLabel}</span>
+              {lastSweep && ` · paged ${lastSweep.fired}/${lastSweep.checked}`}
+            </Text>
+            {lastSweep && (
+              <Text size="xs" variant="secondary">
+                {showSweepDetails ? "▾" : "▸"}
+              </Text>
+            )}
+          </button>
+          {showSweepDetails && lastSweep && (
+            <Surface className="rounded-md ring ring-kumo-line p-2 space-y-1">
+              {lastSweep.busyTitle && (
+                <Text size="xs" variant="secondary">
+                  📅 during: {lastSweep.busyTitle}
+                </Text>
+              )}
+              {lastSweep.perService.length === 0 ? (
+                <Text size="xs" variant="secondary">
+                  No services to check.
+                </Text>
+              ) : (
+                lastSweep.perService.map((r) => (
+                  <div
+                    key={r.id}
+                    className="flex items-baseline justify-between gap-2"
+                  >
+                    <Text size="xs">
+                      <span className="mr-1">{outcomeIcon(r.outcome)}</span>
+                      <span className="text-kumo-default">{r.name}</span>
+                      {r.detail && (
+                        <span className="text-kumo-subtle"> · {r.detail}</span>
+                      )}
+                    </Text>
+                    <Text size="xs" variant="secondary">
+                      {r.outcome}
+                    </Text>
+                  </div>
+                ))
+              )}
+            </Surface>
+          )}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onRunSweep}
+            className="w-full"
+          >
+            Run sweep now
+          </Button>
+          <div className="text-center">
+            <Text size="xs" variant="secondary">
+              auto-sweeps every minute
+            </Text>
+          </div>
+        </div>
       </div>
     </aside>
   );
@@ -355,6 +722,10 @@ function Chat() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toasts = useKumoToastManager();
+  // Dev mode: append ?dev=1 to the URL to reveal the ⚡ "force due" button on cards.
+  const devMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("dev");
 
   const agent = useAgent<ChatAgent, ChatAgentState>({
     agent: "ChatAgent",
@@ -374,6 +745,54 @@ function Chat() {
               description: data.description,
               timeout: 0
             });
+          } else if (data.type === "cadence-sweep-paged") {
+            const names = (data.firedNames as string[]).join(", ");
+            toasts.add({
+              title: `Sweep paged ${data.firedNames.length}`,
+              description: `Overdue: ${names}. Check your phone.`,
+              timeout: 6000
+            });
+          } else if (data.type === "cadence-sweep-deferred") {
+            const names = (data.deferredNames as string[]).join(", ");
+            const busy = data.busyTitle ? ` (busy: ${data.busyTitle})` : "";
+            toasts.add({
+              title: `📅 Deferred ${data.deferredNames.length}`,
+              description: `${names} — paused while you're in meetings${busy}.`,
+              timeout: 5000
+            });
+          } else if (data.type === "pd-incident-triggered") {
+            toasts.add({
+              title: `Incident: ${data.serviceName}`,
+              description: "PagerDuty just paged you. Check your phone.",
+              timeout: 5000
+            });
+          } else if (data.type === "pd-incident-acked") {
+            toasts.add({
+              title: `Acknowledged: ${data.serviceName}`,
+              description: "You're on it. Mark fulfilled when done.",
+              timeout: 4000
+            });
+          } else if (data.type === "pd-incident-resolved") {
+            toasts.add({
+              title: `Resolved: ${data.serviceName}`,
+              description: "Back to green. SLO clock reset.",
+              timeout: 4000
+            });
+          } else if (data.type === "pd-sync-changes") {
+            const updates = data.updates as Array<{
+              name: string;
+              transition: string;
+            }>;
+            const resolved = updates.filter((u) =>
+              u.transition.endsWith("resolved")
+            );
+            if (resolved.length > 0) {
+              toasts.add({
+                title: `Synced ${resolved.length} from PagerDuty`,
+                description: `${resolved.map((u) => u.name).join(", ")} resolved while you were away — marked fulfilled.`,
+                timeout: 5000
+              });
+            }
           }
         } catch {
           // Not JSON or not our event
@@ -510,20 +929,262 @@ function Chat() {
     }
   }, [hasUnurledDeployment, connected, agent]);
 
+  // Sync incident state with PagerDuty whenever the tab regains focus.
+  // Catches cases where the user resolved/acked on the PD mobile app while
+  // the tab was backgrounded and webhooks didn't reach us.
+  const hasOpenIncidents = services.some((s) => s.activeDedupKey);
+  useEffect(() => {
+    if (!connected) return;
+    const sync = () => {
+      if (document.hidden) return;
+      if (!hasOpenIncidents) return;
+      agent.stub.syncOpenIncidents().catch((e) => console.error(e));
+    };
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, [connected, hasOpenIncidents, agent]);
+
   return (
     <div className="flex h-screen bg-kumo-elevated">
       <LifeOpsSidebar
         services={services}
+        lastSweep={agent.state?.lastSweep}
+        webhookUrl={agent.state?.pdWebhookUrl}
+        calendarStatus={agent.state?.calendarStatus}
+        googleConnected={Boolean(agent.state?.googleAccessToken)}
+        devMode={devMode}
+        onForceDue={async (s) => {
+          try {
+            const res = await agent.stub.demoForceDueAndSweep(s.id);
+            const sweepResult = res?.lastSweep;
+            const myResult = sweepResult?.perService.find(
+              (r) => r.id === s.id
+            );
+            if (myResult?.outcome === "deferred") {
+              toasts.add({
+                title: `📅 ${s.name} deferred`,
+                description: `Forced due — calendar gate held the page${myResult.detail ? ` (${myResult.detail})` : ""}.`,
+                timeout: 5000
+              });
+            } else if (myResult?.outcome === "paged") {
+              toasts.add({
+                title: `🚨 ${s.name} paged`,
+                description: "Forced due — calendar was free, page fired.",
+                timeout: 5000
+              });
+            } else {
+              toasts.add({
+                title: `${s.name}: ${myResult?.outcome ?? "unknown"}`,
+                description: myResult?.detail ?? "Sweep ran.",
+                timeout: 4000
+              });
+            }
+          } catch (e) {
+            toasts.add({
+              title: "Force due failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
+        }}
+        onConnectGoogle={async (token) => {
+          try {
+            const res = await agent.stub.setGoogleAccessToken(token);
+            if (res.connected) {
+              toasts.add({
+                title: "📅 Calendar connected",
+                description:
+                  "Reading today's events. Sweep will defer non-urgent pages during meetings.",
+                timeout: 4000
+              });
+            } else {
+              toasts.add({
+                title: "Token rejected",
+                description:
+                  res.error ?? "Google rejected the token. Make sure you copied a fresh one.",
+                timeout: 6000
+              });
+            }
+          } catch (e) {
+            toasts.add({
+              title: "Connect failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
+        }}
+        onDisconnectGoogle={async () => {
+          await agent.stub.setGoogleAccessToken(null);
+          toasts.add({
+            title: "Calendar disconnected",
+            description: "Sweep will page everything regardless of meetings.",
+            timeout: 3000
+          });
+        }}
+        onRefreshCalendar={async () => {
+          try {
+            const status = await agent.stub.refreshCalendarStatus();
+            if (!status) {
+              toasts.add({
+                title: "Not connected",
+                description: "Connect Google Calendar first.",
+                timeout: 4000
+              });
+              return;
+            }
+            toasts.add({
+              title: status.busyNow ? "Busy" : "Free now",
+              description: status.busyNow
+                ? `${status.busyTitle} until ${
+                    status.busyUntil
+                      ? new Date(status.busyUntil).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit"
+                        })
+                      : "?"
+                  }`
+                : "No meeting blocking pages right now.",
+              timeout: 4000
+            });
+          } catch (e) {
+            toasts.add({
+              title: "Calendar refresh failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
+        }}
+        onVerifyWebhook={async () => {
+          try {
+            const res = await agent.stub.verifyAndEnsurePdWebhook(
+              window.location.origin
+            );
+            if (res.status === "ok") {
+              toasts.add({
+                title: "Webhook ✓",
+                description: "Subscription is live in PagerDuty.",
+                timeout: 3000
+              });
+            } else if (res.status === "re-enabled") {
+              toasts.add({
+                title: "Webhook re-enabled",
+                description:
+                  "PagerDuty had disabled it after delivery failures. Back online.",
+                timeout: 5000
+              });
+            } else if (res.status === "created") {
+              toasts.add({
+                title: "Webhook created",
+                description: `Now subscribed: ${res.url}`,
+                timeout: 4000
+              });
+            } else if (res.status === "unsupported-origin") {
+              toasts.add({
+                title: "Deploy first",
+                description: res.message,
+                timeout: 0
+              });
+            } else {
+              toasts.add({
+                title: "Webhook setup failed",
+                description: res.message ?? "Unknown error",
+                timeout: 6000
+              });
+            }
+          } catch (e) {
+            toasts.add({
+              title: "Webhook setup failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
+        }}
+        onRunSweep={async () => {
+          try {
+            const res = await agent.stub.runCadenceSweep();
+            if (res && res.fired > 0) {
+              toasts.add({
+                title: `Sweep paged ${res.fired}`,
+                description: `Overdue: ${res.firedNames.join(", ")}`,
+                timeout: 5000
+              });
+            } else {
+              toasts.add({
+                title: "Sweep clean",
+                description: `Checked ${res?.checked ?? 0} services. Nothing overdue.`,
+                timeout: 3000
+              });
+            }
+          } catch (e) {
+            toasts.add({
+              title: "Sweep failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
+        }}
         onDeploy={(s) => {
           sendMessage({
             role: "user",
             parts: [
               {
                 type: "text",
-                text: `Wire up "${s.name}" to PagerDuty — ask me about escalation first, then deploy.`
+                text: `Deploy "${s.name}" to PagerDuty. Generate the witty escalation policy yourself — it always defaults to paging only me.`
               }
             ]
           });
+        }}
+        onPageNow={async (s) => {
+          try {
+            const res = await agent.stub.pageNowLifeService(s.id);
+            if (res && "error" in res) {
+              toasts.add({
+                title: "Page failed",
+                description: String(res.error),
+                timeout: 6000
+              });
+            } else if (res && "alreadyOpen" in res) {
+              toasts.add({
+                title: "Already paged",
+                description: `Incident open for ${s.name}`,
+                timeout: 3000
+              });
+            } else {
+              toasts.add({
+                title: `Paged: ${s.name}`,
+                description: "Check your phone — PagerDuty is doing the rest.",
+                timeout: 4000
+              });
+            }
+          } catch (e) {
+            toasts.add({
+              title: "Page failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
+        }}
+        onResolve={async (s) => {
+          try {
+            await agent.stub.resolveLifeService(s.id);
+            toasts.add({
+              title: `Marked fulfilled: ${s.name}`,
+              description: s.activeDedupKey
+                ? "Incident resolved, SLO clock reset."
+                : "SLO clock reset.",
+              timeout: 3000
+            });
+          } catch (e) {
+            toasts.add({
+              title: "Resolve failed",
+              description: e instanceof Error ? e.message : String(e),
+              timeout: 6000
+            });
+          }
         }}
       />
       <div

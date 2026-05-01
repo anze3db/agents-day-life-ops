@@ -132,6 +132,51 @@ export class PagerDutyClient {
     return data.integration;
   }
 
+  /** List webhook subscriptions on the account. */
+  async listWebhookSubscriptions(): Promise<
+    Array<{
+      id: string;
+      delivery_method?: {
+        url?: string;
+        temporarily_disabled?: boolean;
+      };
+      description?: string;
+      active?: boolean;
+    }>
+  > {
+    const data = await this.rest<{
+      webhook_subscriptions: Array<{
+        id: string;
+        delivery_method?: {
+          url?: string;
+          temporarily_disabled?: boolean;
+        };
+        description?: string;
+        active?: boolean;
+      }>;
+    }>("/webhook_subscriptions");
+    return data.webhook_subscriptions;
+  }
+
+  /** Re-enable a temporarily-disabled webhook subscription. */
+  async enableWebhookSubscription(id: string): Promise<void> {
+    const res = await fetch(
+      `${REST_BASE}/webhook_subscriptions/${id}/enable`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Token token=${this.token}`,
+          Accept: "application/vnd.pagerduty+json;version=2"
+        }
+      }
+    );
+    if (!res.ok) {
+      throw new Error(
+        `PD POST /webhook_subscriptions/${id}/enable ${res.status}: ${await res.text()}`
+      );
+    }
+  }
+
   /** Create a webhook subscription. Returns secret for HMAC verification. */
   async createWebhookSubscription(input: {
     url: string;
@@ -161,6 +206,34 @@ export class PagerDutyClient {
       }
     });
     return data.webhook_subscription;
+  }
+
+  /** List incidents on the account, optionally filtered by service / status. */
+  async listIncidents(input: {
+    serviceIds: string[];
+    statuses?: ("triggered" | "acknowledged" | "resolved")[];
+    limit?: number;
+  }): Promise<
+    Array<{
+      id: string;
+      incident_key?: string;
+      status: "triggered" | "acknowledged" | "resolved";
+      service?: { id?: string };
+    }>
+  > {
+    const params = new URLSearchParams();
+    for (const id of input.serviceIds) params.append("service_ids[]", id);
+    for (const s of input.statuses ?? []) params.append("statuses[]", s);
+    if (input.limit) params.set("limit", String(input.limit));
+    const data = await this.rest<{
+      incidents: Array<{
+        id: string;
+        incident_key?: string;
+        status: "triggered" | "acknowledged" | "resolved";
+        service?: { id?: string };
+      }>;
+    }>(`/incidents?${params.toString()}`);
+    return data.incidents;
   }
 
   async getService(

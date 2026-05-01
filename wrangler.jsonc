@@ -10,10 +10,6 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	"ai": {
-		"binding": "AI",
-		"remote": true
-	},
 	"assets": {
 		"directory": "./public",
 		"not_found_handling": "single-page-application",
